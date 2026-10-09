@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<!-- iOS 坑：viewport-fit=cover 让页面延伸进刘海/底部横条区域，配合 CSS 的
+     env(safe-area-inset-*) 做留白，否则刘海屏会遮挡内容 -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<!-- PWA / 添加到主屏幕（iOS Safari 识别的是 apple-* 这一组标签） -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="提词器">
+<meta name="theme-color" content="#000000">
+<link rel="apple-touch-icon" href="icon.png">
+<!-- 内嵌 manifest（data URI，避免第二个文件）；# 号必须写成 %23 -->
+<link rel="manifest" href='data:application/manifest+json,{"name":"提词器","short_name":"提词器","start_url":".","display":"standalone","background_color":"%23000000","theme_color":"%23000000","icons":[{"src":"icon.png","sizes":"180x180","type":"image/png"}]}'>
+<title>提词器</title>
+<style>
+/* ==================== 基础与 iOS 约束 ==================== */
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  /* iOS 坑：把 body 固定为视口大小并禁止整页滚动，
+     彻底防掉橡皮筋回弹与地址栏收起时的页面跳动；滚动全部发生在内部容器 */
+  position:fixed;inset:0;overflow:hidden;
+  overscroll-behavior:none;            /* 防下拉刷新 / 橡皮筋 */
+  background:#0b0c10;color:#ececf1;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;touch-action:manipulation}
+/* 三个视图单页切换：列表 / 编辑 / 播放 */
+.view{display:none;flex-direction:column;
+  /* iOS 坑：100vh 在地址栏收起时会撑破布局，优先用 100dvh（旧系统回退 100vh/100%） */
+  height:100vh;height:100dvh;height:100%}
+.view.active{display:flex}
+
+/* ==================== 顶栏（列表/编辑共用） ==================== */
+.topbar{
+  display:flex;align-items:center;gap:10px;flex:none;
+  padding-top:calc(10px + env(safe-area-inset-top));    /* 让开刘海/灵动岛 */
+  padding-bottom:10px;
+  padding-left:calc(16px + env(safe-area-inset-left));
+  padding-right:calc(16px + env(safe-area-inset-right));
+  background:#101116;border-bottom:1px solid #1e1f26;
+}
+.topbar h1{font-size:20px;font-weight:700;flex:1;letter-spacing:.5px}
+.topbar .count{font-size:13px;color:#6d7684}
+.btn-primary{background:#2f7bff;color:#fff;border-radius:10px;padding:8px 14px;font-size:15px;font-weight:600;white-space:nowrap}
+.btn-primary:active{background:#2568dd}
+.btn-ghost{color:#9aa1ad;font-size:16px;padding:8px 2px;white-space:nowrap}
+
+/* ==================== 视图一：脚本列表 ==================== */
+.home-hint{
+  flex:none;margin:10px 16px 0;
+  padding:10px 12px;border-radius:10px;background:#171a21;
+  color:#8b93a1;font-size:13px;line-height:1.6;
+}
+.home-hint b{color:#c9d4e3;font-weight:600}
+.scroll-area{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.script-list{padding:12px 16px calc(110px + env(safe-area-inset-bottom))}
+.card{background:#15161c;border:1px solid #23252e;border-radius:14px;padding:14px 14px 10px;margin-bottom:12px}
+.card:active{background:#1b1d26}
+.card-title{font-size:17px;font-weight:600;margin-bottom:6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-preview{font-size:14px;color:#8b93a1;line-height:1.5;max-height:4.2em;overflow:hidden;word-break:break-all}
+.card-meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
+.card-time{font-size:12px;color:#5c6370}
+.card-actions button{font-size:13px;color:#9aa1ad;padding:7px 12px;border-radius:8px;background:#1d202a;margin-left:8px}
+.card-actions button:active{background:#282c38}
+.card-actions button.danger{color:#ff6b6b}
+.empty{padding:18vh 40px 0;text-align:center;color:#5c6370}
+.empty-title{font-size:17px;font-weight:600;color:#8b93a1;margin-bottom:8px}
+.empty-sub{font-size:14px;line-height:1.7}
+.fab{
+  position:fixed;z-index:20;
+  right:calc(18px + env(safe-area-inset-right));
+  bottom:calc(24px + env(safe-area-inset-bottom));
+  width:58px;height:58px;border-radius:50%;
+  background:#2f7bff;color:#fff;font-size:32px;line-height:1;
+  display:flex;align-items:center;justify-content:center;
+  box-shadow:0 6px 22px rgba(47,123,255,.45);
+}
+.fab:active{transform:scale(.92)}
+
+/* ==================== 视图二：编辑 ==================== */
+.edit-body{
+  flex:1;display:flex;flex-direction:column;gap:10px;overflow:hidden;
+  padding:12px 16px calc(16px + env(safe-area-inset-bottom));
+}
+/* iOS 坑：输入框字号小于 16px 时，聚焦会触发 Safari 自动放大页面，必须 >= 16px */
+.inp-title{
+  flex:none;background:#15161c;border:1px solid #23252e;border-radius:10px;
+  color:#fff;font-size:17px;padding:12px;outline:none;
+}
+.inp-title:focus{border-color:#2f7bff}
+.inp-text{
+  flex:1;background:#15161c;border:1px solid #23252e;border-radius:10px;
+  color:#e8eaf0;font-size:17px;line-height:1.85;padding:12px;outline:none;
+  resize:none;-webkit-overflow-scrolling:touch;
+}
+.inp-text:focus{border-color:#2f7bff}
+.save-state{flex:1;text-align:center;font-size:13px;color:#6d7684}
+.save-state.dirty{color:#9aa1ad}
+
+/* 防御：下方多个遮罩类自带 display:flex，会覆盖 [hidden] 的浏览器默认 display:none，
+   导致 hidden 属性失效、遮罩永久悬浮并拦截舞台点击。必须强制压住。 */
+[hidden]{display:none!important}
+
+/* ==================== 视图三：提词播放 ==================== */
+/* iOS 坑：iPhone Safari 没有Fullscreen API，用 fixed+inset:0 做伪全屏 */
+#view-play{position:fixed;inset:0;z-index:60;background:#000;touch-action:manipulation}
+.stage{position:relative;flex:1;overflow:hidden;background:#000;
+  user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.scroller{width:100%;will-change:transform}         /* 滚动引擎只改它的 transform */
+.mirror-box{width:100%}
+.mirror-box.mirrored{transform:scaleX(-1)}           /* 镜像模式：配提词器硬件用 */
+.tele-text{
+  color:#fff;line-height:1.72;letter-spacing:.02em;
+  white-space:pre-wrap;word-break:break-word;        /* 保留脚本换行 */
+  padding-left:22px;padding-right:22px;
+}
+/* 阅读线上下的黑色渐变遮罩，把注意力压到阅读线上 */
+.mask-top{position:absolute;left:0;right:0;top:0;height:46%;pointer-events:none;z-index:3;
+  background:linear-gradient(to bottom,rgba(0,0,0,.92) 0%,rgba(0,0,0,.55) 45%,rgba(0,0,0,0) 100%)}
+.mask-bottom{position:absolute;left:0;right:0;bottom:0;height:46%;pointer-events:none;z-index:3;
+  background:linear-gradient(to top,rgba(0,0,0,.92) 0%,rgba(0,0,0,.55) 45%,rgba(0,0,0,0) 100%)}
+.readline{position:absolute;left:0;right:0;top:calc(45% - 1px);height:2px;pointer-events:none;z-index:4;
+  background:rgba(96,165,250,.6);box-shadow:0 0 10px rgba(96,165,250,.35)}
+/* 顶部细进度条（避开状态栏安全区） */
+.progress{position:absolute;left:0;right:0;top:env(safe-area-inset-top);height:2px;z-index:6;
+  background:rgba(255,255,255,.12);pointer-events:none}
+.progress i{display:block;height:100%;width:0;background:#3b82f6}
+/* 暂停等轻提示 */
+.hint-pill{
+  position:absolute;left:50%;top:20%;transform:translateX(-50%);z-index:7;
+  background:rgba(18,19,24,.85);color:#dfe3ea;font-size:16px;
+  padding:10px 24px;border-radius:22px;pointer-events:none;
+  opacity:0;transition:opacity .25s;
+}
+.hint-pill.show{opacity:1}
+/* 3-2-1 倒计时 */
+.countdown{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;
+  background:rgba(0,0,0,.3)}
+.countdown span{font-size:120px;font-weight:700;color:#fff;text-shadow:0 4px 34px rgba(59,130,246,.65)}
+.countdown span.zoom{animation:cdzoom .8s ease-out}
+@keyframes cdzoom{0%{transform:scale(1.55);opacity:.15}100%{transform:scale(1);opacity:1}}
+/* 完成遮罩 */
+.done-overlay{position:absolute;inset:0;z-index:9;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;background:rgba(0,0,0,.8)}
+.done-text{font-size:26px;font-weight:700;color:#fff}
+.done-sub{font-size:15px;color:#9aa1ad}
+
+/* 底部控制条 */
+.controls{
+  flex:none;display:flex;flex-direction:column;gap:10px;
+  background:#0d0e12;border-top:1px solid #1d1f27;
+  padding-top:10px;padding-bottom:calc(12px + env(safe-area-inset-bottom));
+  padding-left:calc(14px + env(safe-area-inset-left));
+  padding-right:calc(14px + env(safe-area-inset-right));
+  transition:opacity .35s,transform .35s;
+}
+.controls.hidden{opacity:0;pointer-events:none;transform:translateY(12px)}
+.ctl-row{display:flex;align-items:stretch;justify-content:space-between;gap:8px}
+.ctl-row button{
+  font-size:14px;color:#c8ceda;background:#1a1c24;border-radius:10px;
+  padding:10px 10px;min-width:46px;white-space:nowrap;
+}
+.ctl-row button:active{background:#262a36}
+.ctl-row .ctl-play{flex:1;background:#2f7bff;color:#fff;font-weight:600;font-size:16px}
+.ctl-row .ctl-play:active{background:#2568dd}
+.ctl-row .toggle.on{background:#123a75;color:#7fb5ff;box-shadow:inset 0 0 0 1px #2f5fb0}
+.ctl-adjust{justify-content:space-around}
+.adj{display:flex;align-items:center;gap:2px;background:#1a1c24;border-radius:10px;padding:2px}
+.adj button{min-width:48px;min-height:42px;font-size:17px}
+.adj-val{display:flex;flex-direction:column;align-items:center;min-width:56px;padding:0 4px}
+.adj-val b{font-size:16px;font-weight:700}
+.adj-val i{font-style:normal;font-size:10px;color:#77808f;margin-top:1px}
+/* 横屏矮屏微调 */
+@media (max-height:420px){
+  .controls{padding-top:6px;padding-bottom:calc(6px + env(safe-area-inset-bottom));gap:6px}
+  .ctl-row button{padding:7px 8px}
+  .countdown span{font-size:80px}
+  .hint-pill{top:12%}
+}
+
+/* 常亮兜底用的隐形视频（1px 级别、近乎透明，但不能 display:none，否则 iOS 会暂停它） */
+#keepAwakeVideo{position:fixed;right:0;bottom:0;width:2px;height:2px;opacity:.001;pointer-events:none;z-index:0}
+</style>
+</head>
+<body>
+
+<!-- ==================== 视图一：脚本列表 ==================== -->
+<section id="view-list" class="view active">
+  <header class="topbar">
+    <h1>提词器</h1>
+    <span class="count" id="scriptCount"></span>
+  </header>
+  <div class="home-hint" id="homeHint">
+    建议用 Safari <b>分享 → 添加到主屏幕</b>，从主屏幕打开即可<b>全屏</b>使用，录口播更顺手
+  </div>
+  <div class="scroll-area">
+    <div id="scriptList" class="script-list"></div>
+    <div id="emptyState" class="empty" hidden>
+      <div class="empty-title">还没有脚本</div>
+      <div class="empty-sub">点右下角「＋」新建一个，<br>把口播稿粘贴进来，就能开始提词了</div>
+    </div>
+  </div>
+  <button class="fab" id="btnNew" aria-label="新建脚本">＋</button>
+</section>
+
+<!-- ==================== 视图二：编辑 ==================== -->
+<section id="view-edit" class="view">
+  <header class="topbar">
+    <button class="btn-ghost" id="btnBackList">‹ 返回</button>
+    <span class="save-state" id="saveState">已保存</span>
+    <button class="btn-primary" id="btnStart">开始提词</button>
+  </header>
+  <div class="edit-body">
+    <input id="inpTitle" class="inp-title" type="text" placeholder="脚本标题" maxlength="60" autocomplete="off" autocapitalize="off" autocorrect="off">
+    <textarea id="inpText" class="inp-text" placeholder="在这里粘贴或输入口播稿…&#10;&#10;段落之间建议空一行，提词时更好断句"></textarea>
+  </div>
+</section>
+
+<!-- ==================== 视图三：提词播放 ==================== -->
+<section id="view-play" class="view">
+  <div class="stage" id="stage">
+    <div class="scroller" id="scroller">
+      <div class="mirror-box" id="mirrorBox">
+        <div class="tele-text" id="teleText"></div>
+      </div>
+    </div>
+    <div class="mask-top"></div>
+    <div class="mask-bottom"></div>
+    <div class="readline"></div>
+    <div class="progress"><i id="progressBar"></i></div>
+    <div class="hint-pill" id="hintPill">已暂停</div>
+    <div class="countdown" id="countdownOverlay" hidden><span id="countdownNum">3</span></div>
+    <div class="done-overlay" id="doneOverlay" hidden>
+      <div class="done-text">已完成</div>
+      <div class="done-sub">点击任意处返回编辑</div>
+    </div>
+  </div>
+  <div class="controls" id="controls">
+    <div class="ctl-row">
+      <button id="btnExit">返回</button>
+      <button id="btnBackScreen">倒退一屏</button>
+      <button id="btnPlay" class="ctl-play">播放</button>
+      <button id="btnCountdown" class="toggle">倒计时 关</button>
+      <button id="btnMirror" class="toggle">镜像 关</button>
+    </div>
+    <div class="ctl-row ctl-adjust">
+      <div class="adj">
+        <button id="btnSpeedDown" aria-label="减速">−</button>
+        <span class="adj-val"><b id="speedVal">60</b><i>速度</i></span>
+        <button id="btnSpeedUp" aria-label="加速">＋</button>
+      </div>
+      <div class="adj">
+        <button id="btnFontDown" aria-label="缩小字号">A−</button>
+        <span class="adj-val"><b id="fontVal">48</b><i>字号</i></span>
+        <button id="btnFontUp" aria-label="放大字号">A＋</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 常亮兜底：静音循环微型视频，与 Wake Lock 互补（iOS < 16.4 或锁失效时起作用） -->
+<video id="keepAwakeVideo" muted playsinline loop preload="auto" disablepictureinpicture></video>
+
+<script>
+'use strict';
+(function () {
+  /* ==================== 常量与工具 ==================== */
+  var SCRIPTS_KEY = 'teleprompter_scripts';   // 脚本数据
+  var PREFS_KEY   = 'teleprompter_prefs';     // 偏好设置
+  var READ_POS    = 0.45;                     // 阅读线位置（距顶部 45%，对应上下各约 45dvh 的余量）
+  var KEEP_AWAKE_MP4 = 'data:video/mp4;base64,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';
+
+  /* localStorage 在 Safari 隐私模式 / 容量超限时都会抛异常，必须全部 try/catch */
+  function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { return false; } }
+
+  function $(id) { return document.getElementById(id); }
+  function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+  function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function fmtTime(ts) {
+    var d = new Date(ts), n = new Date();
+    function p(x) { return (x < 10 ? '0' : '') + x; }
+    if (d.toDateString() === n.toDateString()) return '今天 ' + p(d.getHours()) + ':' + p(d.getMinutes());
+    return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + p(d.getHours()) + ':' + p(d.getMinutes());
+  }
+  /* 是否从主屏幕独立模式打开（iOS 专属的 navigator.standalone + 通用 display-mode） */
+  function isStandalone() {
+    return window.navigator.standalone === true ||
+      (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+  }
+
+  /* ==================== 数据层 ==================== */
+  var DEFAULT_PREFS = { fontSize: 48, speed: 60, countdown: false, mirror: false };
+  var prefs = loadPrefs();
+  function loadPrefs() {
+    var out = { };
+    for (var k in DEFAULT_PREFS) out[k] = DEFAULT_PREFS[k];
+    try {
+      var raw = JSON.parse(lsGet(PREFS_KEY) || 'null');
+      if (raw && typeof raw === 'object') {
+        if (typeof raw.fontSize === 'number') out.fontSize = clamp(raw.fontSize, 24, 120);
+        if (typeof raw.speed === 'number')   out.speed   = clamp(raw.speed, 10, 200);
+        out.countdown = !!raw.countdown;
+        out.mirror    = !!raw.mirror;
+      }
+    } catch (e) { /* 损坏数据回退默认值 */ }
+    return out;
+  }
+  function savePrefs() { lsSet(PREFS_KEY, JSON.stringify(prefs)); }
+
+  var scripts = loadScripts();
+  function loadScripts() {
+    try {
+      var arr = JSON.parse(lsGet(SCRIPTS_KEY) || '[]');
+      if (Object.prototype.toString.call(arr) === '[object Array]') {
+        return arr.filter(function (s) { return s && typeof s.id === 'string'; }).map(function (s) {
+          return {
+            id: s.id,
+            title: typeof s.title === 'string' ? s.title : '',
+            text: typeof s.text === 'string' ? s.text : '',
+            updatedAt: Number(s.updatedAt) || Date.now()
+          };
+        });
+      }
+    } catch (e) { /* 损坏数据当作空列表 */ }
+    return [];
+  }
+  function saveScripts() { return lsSet(SCRIPTS_KEY, JSON.stringify(scripts)); }
+
+  /* ==================== 视图切换 ==================== */
+  var currentView = 'list';
+  var currentScript = null;   // 正在编辑的脚本
+  function showView(name) {
+    ['list', 'edit', 'play'].forEach(function (v) {
+      $('view-' + v).classList.toggle('active', v === name);
+    });
+    currentView = name;
+    if (name === 'list') renderList();
+  }
+
+  /* ==================== 视图一：脚本列表 ==================== */
+  function renderList() {
+    $('scriptCount').textContent = scripts.length ? '共 ' + scripts.length + ' 篇' : '';
+    $('emptyState').hidden = scripts.length > 0;
+    $('scriptList').innerHTML = scripts.map(function (s) {
+      var preview = (s.text || '').replace(/\s+/g, ' ').trim().slice(0, 40);  // 正文前 40 字预览
+      return '<div class="card" data-id="' + esc(s.id) + '">' +
+        '<div class="card-title">' + esc(s.title || '无标题') + '</div>' +
+        '<div class="card-preview">' + esc(preview || '（空）') + '</div>' +
+        '<div class="card-meta"><span class="card-time">' + esc(fmtTime(s.updatedAt)) + '</span>' +
+        '<span class="card-actions">' +
+        '<button data-act="copy">复制</button>' +
+        '<button data-act="del" class="danger">删除</button>' +
+        '</span></div></div>';
+    }).join('');
+  }
+
+  $('scriptList').addEventListener('click', function (e) {
+    var card = e.target.closest ? e.target.closest('.card') : null;
+    if (!card) return;
+    var id = card.getAttribute('data-id');
+    var btn = e.target.closest ? e.target.closest('button') : null;
+    var act = btn ? btn.getAttribute('data-act') : null;
+    if (act === 'del') {
+      var s = null;
+      for (var i = 0; i < scripts.length; i++) if (scripts[i].id === id) s = scripts[i];
+      if (window.confirm('删除「' + (s && (s.title || '无标题')) + '」？删除后无法恢复。')) {
+        scripts = scripts.filter(function (x) { return x.id !== id; });
+        saveScripts();
+        renderList();
+      }
+      return;
+    }
+    if (act === 'copy') {
+      var idx = -1;
+      for (var j = 0; j < scripts.length; j++) if (scripts[j].id === id) idx = j;
+      if (idx > -1) {
+        var src = scripts[idx];
+        scripts.splice(idx + 1, 0, {
+          id: uid(), title: (src.title || '无标题') + ' 副本',
+          text: src.text, updatedAt: Date.now()
+        });
+        saveScripts();
+        renderList();
+      }
+      return;
+    }
+    openEditor(id);   // 点卡片其它区域 → 进入编辑
+  });
+
+  function newScript() {
+    var s = { id: uid(), title: '', text: '', updatedAt: Date.now() };
+    scripts.unshift(s);
+    saveScripts();
+    openEditor(s.id);
+  }
+  $('btnNew').addEventListener('click', newScript);
+
+  /* ==================== 视图二：编辑 ==================== */
+  var saveTimer = 0;
+  function openEditor(id) {
+    currentScript = null;
+    for (var i = 0; i < scripts.length; i++) if (scripts[i].id === id) currentScript = scripts[i];
+    if (!currentScript) return;
+    $('inpTitle').value = currentScript.title;
+    $('inpText').value = currentScript.text;
+    setSaveState('已保存', false);
+    showView('edit');
+  }
+  function setSaveState(txt, dirty) {
+    var el = $('saveState');
+    el.textContent = txt;
+    el.classList.toggle('dirty', !!dirty);
+  }
+  /* 自动保存：输入防抖 500ms */
+  function onEditInput() {
+    setSaveState('保存中…', true);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(doSave, 500);
+  }
+  function doSave() {
+    clearTimeout(saveTimer);
+    if (!currentScript) return;
+    currentScript.title = $('inpTitle').value.trim();
+    currentScript.text = $('inpText').value;
+    currentScript.updatedAt = Date.now();
+    var ok = saveScripts();
+    setSaveState(ok ? '已保存' : '保存失败（存储受限）', !ok);
+    return ok;
+  }
+  $('inpTitle').addEventListener('input', onEditInput);
+  $('inpText').addEventListener('input', onEditInput);
+
+  function backToList() {
+    doSave();
+    /* 全空的新建脚本不留垃圾卡片 */
+    if (currentScript && !currentScript.text.trim() && !currentScript.title.trim()) {
+      scripts = scripts.filter(function (x) { return x.id !== currentScript.id; });
+      saveScripts();
+    }
+    currentScript = null;
+    showView('list');
+  }
+  $('btnBackList').addEventListener('click', backToList);
+
+  $('btnStart').addEventListener('click', function () {
+    doSave();
+    if (!$('inpText').value.trim()) { $('inpText').focus(); return; }   // 空脚本不让进播放页
+    enterPlay();
+  });
+  /* iOS 上切走/杀掉页面前的最后兜底保存 */
+  window.addEventListener('pagehide', function () { if (currentView === 'edit') doSave(); });
+
+  /* ==================== 视图三：提词播放 ==================== */
+  var player = {
+    playing: false,   // 是否正在滚动
+    counting: false,  // 是否处于 3-2-1 倒计时
+    done: false,      // 是否已滚到结尾
+    offset: 0,        // 当前滚动距离（px）
+    maxScroll: 0,     // 总滚动距离（px）
+    lastTs: 0,        // 上一帧时间戳，用于 dt 补偿
+    rafId: 0,
+    cdTimer: 0
+  };
+  var wakeLock = null;
+
+  /* 布局：按视口高度给正文计算上下余量。
+     数学上：padTop = H*45%（首行恰好出现在阅读线处），
+             padBottom = H*55%（末行恰好滚回阅读线处结束），
+             两者相加正好 = H，因此 maxScroll = 正文自身高度，起止都在阅读线上。 */
+  function layoutPlayer() {
+    var stage = $('stage');
+    var H = stage.clientHeight;
+    if (H <= 0) return;
+    var top = Math.round(H * READ_POS);
+    var t = $('teleText');
+    t.style.paddingTop = top + 'px';
+    t.style.paddingBottom = (H - top) + 'px';
+    t.style.fontSize = prefs.fontSize + 'px';
+    player.maxScroll = Math.max(0, $('scroller').scrollHeight - H);
+    if (player.offset > player.maxScroll) player.offset = player.maxScroll;
+  }
+  /* 只改 transform，不碰 scrollTop —— iOS 上 transform 由合成器执行，最顺滑 */
+  function applyOffset() {
+    $('scroller').style.transform = 'translate3d(0,' + (-Math.round(player.offset)) + 'px,0)';
+  }
+  function setProgress(ratio) {
+    $('progressBar').style.width = (clamp(ratio, 0, 1) * 100).toFixed(2) + '%';
+  }
+
+  /* 滚动引擎：requestAnimationFrame + 按帧间隔补偿。
+     速度单位 px/s，dt 补偿后 60Hz 与 120Hz ProMotion 屏速度完全一致；
+     dt 上限 100ms，防止切后台回来一帧跳过一大段。 */
+  function frame(ts) {
+    if (!player.playing) { player.rafId = 0; return; }
+    if (!player.lastTs) player.lastTs = ts;
+    var dt = Math.min(ts - player.lastTs, 100);
+    player.lastTs = ts;
+    player.offset += prefs.speed * dt / 1000;
+    if (player.offset >= player.maxScroll) {
+      player.offset = player.maxScroll;
+      applyOffset();
+      finishPlay();
+      return;
+    }
+    applyOffset();
+    setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
+    player.rafId = requestAnimationFrame(frame);
+  }
+
+  function startPlay() {
+    if (player.maxScroll <= 0) { toast('脚本为空，无法开始'); return; }
+    player.playing = true;
+    player.lastTs = 0;
+    if (!player.rafId) player.rafId = requestAnimationFrame(frame);
+    updatePlayBtn();
+    scheduleHide();
+  }
+  function pausePlay() {
+    player.playing = false;
+    if (player.rafId) { cancelAnimationFrame(player.rafId); player.rafId = 0; }
+    updatePlayBtn();
+  }
+  function finishPlay() {
+    player.playing = false;
+    if (player.rafId) { cancelAnimationFrame(player.rafId); player.rafId = 0; }
+    player.done = true;
+    setProgress(1);
+    $('doneOverlay').hidden = false;
+    updatePlayBtn();
+  }
+  function updatePlayBtn() {
+    $('btnPlay').textContent = player.counting ? '取消'
+      : player.playing ? '暂停'
+      : player.done ? '重播' : '播放';
+  }
+
+  /* ---- 3-2-1 倒计时 ---- */
+  function startCountdown() {
+    player.counting = true;
+    updatePlayBtn();
+    $('countdownOverlay').hidden = false;
+    var n = 3;
+    var step = function () {
+      if (!player.counting) return;
+      var num = $('countdownNum');
+      num.textContent = n > 0 ? String(n) : '开始';
+      num.className = '';
+      void num.offsetWidth;            // 强制重排以重触发缩放动画
+      num.className = 'zoom';
+      if (n > 0) {
+        n--;
+        player.cdTimer = setTimeout(step, 800);
+      } else {
+        player.cdTimer = setTimeout(function () {
+          player.counting = false;
+          $('countdownOverlay').hidden = true;
+          updatePlayBtn();
+          startPlay();
+        }, 650);
+      }
+    };
+    step();
+  }
+  function cancelCountdown() {
+    clearTimeout(player.cdTimer);
+    player.counting = false;
+    $('countdownOverlay').hidden = true;
+    updatePlayBtn();
+    toast('已取消');
+  }
+
+  /* ---- 进入 / 退出播放页 ---- */
+  function enterPlay() {
+    $('teleText').textContent = currentScript ? currentScript.text : '';
+    $('mirrorBox').classList.toggle('mirrored', prefs.mirror);
+    syncControlsUI();
+    player.playing = false; player.counting = false; player.done = false;
+    player.offset = 0; player.lastTs = 0;
+    $('doneOverlay').hidden = true;
+    $('countdownOverlay').hidden = true;
+    showView('play');       // 先显示视图，stage 才有真实尺寸
+    layoutPlayer();
+    applyOffset();
+    setProgress(0);
+    updatePlayBtn();
+    showControls();
+    keepAwakeOn();          // 在「开始提词」按钮的用户手势里请求常亮，iOS 才放行
+  }
+  function exitPlay() {
+    if (player.counting) cancelCountdown();
+    pausePlay();
+    keepAwakeOff();
+    $('doneOverlay').hidden = true;
+    showView('edit');
+  }
+  $('btnExit').addEventListener('click', exitPlay);
+  $('doneOverlay').addEventListener('click', function (e) { e.stopPropagation(); exitPlay(); });
+
+  /* ---- 舞台点击：暂停/继续 ---- */
+  $('stage').addEventListener('click', function () {
+    if (player.counting) { cancelCountdown(); return; }
+    if (player.done) return;                       // 完成遮罩自己处理
+    if (player.playing) {
+      pausePlay();
+      toast('已暂停');
+      showControls();                              // 滚动中点文字 = 暂停并唤出控制条
+    } else {
+      startPlay();                                 // 已暂停 → 点击继续
+    }
+  });
+  /* 阻断舞台上的触摸滚动链，保证固定视口不被拖动 */
+  $('stage').addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+
+  /* ---- 底部控制条 ---- */
+  $('btnPlay').addEventListener('click', function () {
+    if (player.counting) { cancelCountdown(); return; }
+    if (player.playing) { pausePlay(); return; }
+    if (player.done) {                            // 重播：回到开头
+      player.done = false;
+      $('doneOverlay').hidden = true;
+      player.offset = 0;
+      applyOffset();
+      setProgress(0);
+    }
+    if (prefs.countdown) startCountdown(); else startPlay();
+  });
+  $('btnBackScreen').addEventListener('click', function () {   // 倒退一屏（约 0.8 屏）
+    if (player.counting) cancelCountdown();
+    if (player.done) {
+      player.done = false;
+      $('doneOverlay').hidden = true;
+    }
+    player.offset = Math.max(0, player.offset - $('stage').clientHeight * 0.8);
+    applyOffset();
+    setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
+    updatePlayBtn();
+  });
+  function adjustSpeed(delta) {
+    prefs.speed = clamp(prefs.speed + delta, 10, 200);
+    savePrefs();
+    syncControlsUI();
+  }
+  function adjustFont(delta) {
+    prefs.fontSize = clamp(prefs.fontSize + delta, 24, 120);
+    savePrefs();
+    syncControlsUI();
+    if (currentView === 'play') { layoutPlayer(); applyOffset(); }   // 字号变了要重算总高度
+  }
+  $('btnSpeedDown').addEventListener('click', function () { adjustSpeed(-10); });
+  $('btnSpeedUp').addEventListener('click', function () { adjustSpeed(10); });
+  $('btnFontDown').addEventListener('click', function () { adjustFont(-8); });
+  $('btnFontUp').addEventListener('click', function () { adjustFont(8); });
+  $('btnCountdown').addEventListener('click', function () {
+    prefs.countdown = !prefs.countdown; savePrefs(); syncControlsUI();
+  });
+  $('btnMirror').addEventListener('click', function () {
+    prefs.mirror = !prefs.mirror; savePrefs();
+    $('mirrorBox').classList.toggle('mirrored', prefs.mirror);
+    syncControlsUI();
+  });
+  function syncControlsUI() {
+    $('speedVal').textContent = String(prefs.speed);
+    $('fontVal').textContent = String(prefs.fontSize);
+    $('btnCountdown').textContent = '倒计时 ' + (prefs.countdown ? '开' : '关');
+    $('btnCountdown').classList.toggle('on', prefs.countdown);
+    $('btnMirror').textContent = '镜像 ' + (prefs.mirror ? '开' : '关');
+    $('btnMirror').classList.toggle('on', prefs.mirror);
+    $('teleText').style.fontSize = prefs.fontSize + 'px';
+  }
+
+  /* ---- 控制条显隐：4 秒无操作淡出；仅播放中隐藏，暂停时保持可见方便调整 ---- */
+  var hideTimer = 0;
+  function scheduleHide() {
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function () {
+      if (player.playing) $('controls').classList.add('hidden');
+    }, 4000);
+  }
+  function showControls() {
+    $('controls').classList.remove('hidden');
+    scheduleHide();
+  }
+  $('controls').addEventListener('pointerdown', function () { showControls(); });
+
+  /* ---- 轻提示 ---- */
+  var pillTimer = 0;
+  function toast(msg) {
+    var el = $('hintPill');
+    el.textContent = msg;
+    el.classList.add('show');
+    clearTimeout(pillTimer);
+    pillTimer = setTimeout(function () { el.classList.remove('show'); }, 1100);
+  }
+
+  /* ---- 屏幕常亮：Wake Lock（iOS 16.4+）为主，静音循环视频兜底 ---- */
+  function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator && navigator.wakeLock && navigator.wakeLock.request) {
+        /* request() 在无痕/未聚焦等情况下会 reject，必须捕获，避免 unhandledrejection */
+        var p = navigator.wakeLock.request('screen');
+        if (p && p.then) p.then(function (lock) {
+          wakeLock = lock;
+          lock.addEventListener('release', function () { wakeLock = null; });
+        }, function () { /* 拿不到锁就靠视频兜底 */ });
+      }
+    } catch (e) { /* 旧系统没有 wakeLock */ }
+  }
+  function releaseWakeLock() {
+    try { if (wakeLock) wakeLock.release(); } catch (e) { /* 已释放 */ }
+    wakeLock = null;
+  }
+  function keepAwakeOn() {
+    requestWakeLock();
+    try {
+      var v = $('keepAwakeVideo');
+      if (!v.src) v.src = KEEP_AWAKE_MP4;
+      v.currentTime = 0;
+      var pr = v.play();
+      if (pr && pr.catch) pr.catch(function () { /* 静默失败，Wake Lock 仍在 */ });
+    } catch (e) { /* 忽略 */ }
+  }
+  function keepAwakeOff() {
+    releaseWakeLock();
+    try { $('keepAwakeVideo').pause(); } catch (e) { /* 忽略 */ }
+  }
+  /* 切后台：自动暂停（防跳读）；回前台：补请求 Wake Lock（系统切后台时会自动释放它） */
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden') {
+      if (player.counting) cancelCountdown();
+      if (player.playing) { pausePlay(); toast('已暂停'); }
+    } else if (currentView === 'play') {
+      requestWakeLock();
+    }
+  });
+
+  /* ---- 尺寸变化（旋转 / 地址栏收起）：重算布局并保持进度 ---- */
+  var rzTimer = 0;
+  window.addEventListener('resize', function () {
+    clearTimeout(rzTimer);
+    rzTimer = setTimeout(function () {
+      if (currentView === 'play') {
+        layoutPlayer();
+        applyOffset();
+        setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
+      }
+    }, 150);
+  });
+
+  /* ==================== 启动 ==================== */
+  /* 请求持久化存储：降低 Safari ITP 对 7 天未使用站点清掉 localStorage 的概率。
+     不在首屏抢着弹（它无 UI、静默），跟着第一次用户交互一起触发。 */
+  var persisted = false;
+  document.addEventListener('pointerdown', function () {
+    if (persisted) return;
+    persisted = true;
+    try {
+      if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().then(function () { }, function () { });
+      }
+    } catch (e) { /* 忽略 */ }
+  }, { capture: true, once: true });
+
+  if (isStandalone()) $('homeHint').hidden = true;   // 已从主屏幕打开就不再提示
+  showView('list');
+
+  /* 部署到 HTTP(S) 后注册 Service Worker 提供真离线；
+     本地 file:// 直接打开时没有 SW，跳过即可（localStorage 照常工作） */
+  if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+    try { navigator.serviceWorker.register('./sw.js').catch(function () {}); } catch (e) { /* 忽略 */ }
+  }
+})();
+</script>
+</body>
+</html>
