@@ -750,6 +750,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     stream: null,         // 视频轨 + 静音音轨的合成流
     audioCtx: null, audioDest: null,
     rafId: 0,
+    wantPlay: false,      // 进入小窗前是否在播放（用于进入后自动续播）
     wrapKey: '', lines: null, lastOff: -1
   };
   function pipSupportOk() {
@@ -835,6 +836,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     $('btnPip').classList.add('on');
     pip.lastOff = -1;                                   // 强制进入后第一帧重绘
     if (!pip.rafId) pip.rafId = requestAnimationFrame(pipFrame);
+    /* 进 PiP 的瞬间浏览器可能把本页切到后台，触发"切后台自动暂停"——
+       但进小窗的意图就是要它继续滚：若刚才在播而现在被停，自动续播 */
+    if (pip.wantPlay && !player.playing && !player.done && player.maxScroll > 0) startPlay();
   }
   function onPipLeave() {
     if (!pip.active) return;
@@ -865,6 +869,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   }
   function enterPip() {
     if (!pipSupportOk()) { toast('当前设备不支持小窗'); return; }
+    pip.wantPlay = player.playing;                      // 供 onPipEnter 判断是否需要自动续播
     try {
       var v = pip.video;
       if (!v) {
@@ -893,7 +898,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
         tracks = pip.csStream.getVideoTracks();
       }
       if (!tracks.length) { toast('当前设备不支持小窗'); return; }
-      /* iOS Safari 关键坑：PiP 要求视频带音轨 → WebAudio 造静音音轨（0Hz + 0 增益双保险）。
+      /* iOS Safari 关键坑：PiP 要求视频带音轨 → WebAudio 造一条人耳不可闻的真实信号音轨
+         （20Hz 次声 + 极低增益；全 0 信号会被部分 iOS 版本判为无效音轨）。
          AudioContext 的创建与 resume 都必须在用户手势内同步完成。 */
       try {
         var AC = window.AudioContext || window.webkitAudioContext;
@@ -902,9 +908,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
             pip.audioCtx = new AC();
             pip.audioDest = pip.audioCtx.createMediaStreamDestination();
             var osc = pip.audioCtx.createOscillator();
-            osc.frequency.value = 0;
+            osc.frequency.value = 20;
             var gain = pip.audioCtx.createGain();
-            gain.gain.value = 0;
+            gain.gain.value = 0.0001;
             osc.connect(gain); gain.connect(pip.audioDest);
             osc.start();
           }
@@ -916,17 +922,48 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
       pip.stream = new MediaStream(tracks);
       v.srcObject = pip.stream;
       pipDraw(true);                                    // 先画一帧，避免小窗打开瞬间黑屏
-      v.play();
-      /* requestPiP 必须留在用户手势调用栈里，不能等 play() 的 Promise */
-      if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
-        var p = v.requestPictureInPicture();
-        if (p && p.catch) p.catch(function () { toast('进入小窗失败'); });
-      } else if (v.webkitSupportsPictureInPicture && v.webkitSetPresentationMode) {
-        v.webkitSetPresentationMode('picture-in-picture');
-      } else {
-        toast('当前设备不支持小窗');
+      var pr = v.play();
+      if (pr && pr.catch) pr.catch(function () { /* muted 内联播放一般不会被拒 */ });
+      function pipFail(msg) {
+        toast('进入小窗失败：' + msg, 3500);
+        try { window.__pipErr = msg; } catch (e3) { /* 诊断残留 */ }
       }
-    } catch (e) { toast('进入小窗失败'); }
+      if ((document.pictureInPictureEnabled && v.requestPictureInPicture) ||
+          (v.webkitSupportsPictureInPicture && v.webkitSetPresentationMode)) {
+        /* 真机踩坑（Chromium 与 Safari 皆然）：流视频 play() 后 metadata/首帧未就绪就请求 PiP
+           会被拒（InvalidStateError / webkit 静默失败）。
+           PiP 的用户手势有效期约 5 秒，足够轮询等首帧（100ms 一次，最多 2.5s）后请求。 */
+        var tries = 0;
+        var tryEnter = function () {
+          if (pipActiveNow()) return;
+          if (v.readyState >= 2 || tries > 25) {
+            if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
+              try {
+                var p = v.requestPictureInPicture();
+                if (p && p.catch) p.catch(function (err) {
+                  pipFail((err && (err.name + ' ' + err.message)) || '未知错误');
+                });
+              } catch (err) { pipFail((err && err.message) || '同步异常'); }
+            } else {
+              try { v.webkitSetPresentationMode('picture-in-picture'); }
+              catch (e3) { pipFail(e3 && e3.message ? e3.message : 'Safari 抛错'); return; }
+              /* 该接口同步不抛错也可能静默失败：600ms 后复查是否真的进入 */
+              setTimeout(function () {
+                if (v.webkitPresentationMode !== 'picture-in-picture' && !pipActiveNow()) {
+                  pipFail('Safari 拒绝 (readyState=' + v.readyState + ')');
+                }
+              }, 600);
+            }
+            return;
+          }
+          tries++;
+          setTimeout(tryEnter, 100);
+        };
+        tryEnter();
+      } else {
+        toast('当前设备不支持小窗', 3500);
+      }
+    } catch (e) { toast('进入小窗失败：' + ((e && e.message) || '未知'), 3500); }
   }
   $('btnPip').addEventListener('click', function () {
     if (pip.active || pipActiveNow()) { exitPip(); return; }
@@ -950,12 +987,12 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
 
   /* ---- 轻提示 ---- */
   var pillTimer = 0;
-  function toast(msg) {
+  function toast(msg, ms) {
     var el = $('hintPill');
     el.textContent = msg;
     el.classList.add('show');
     clearTimeout(pillTimer);
-    pillTimer = setTimeout(function () { el.classList.remove('show'); }, 1100);
+    pillTimer = setTimeout(function () { el.classList.remove('show'); }, ms || 1100);
   }
 
   /* ---- 屏幕常亮：Wake Lock（iOS 16.4+）为主，静音循环视频兜底 ---- */
