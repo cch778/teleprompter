@@ -519,6 +519,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
      小窗（PiP）激活时由 setInterval 驱动（见 pipTickOn）——后台页面 rAF 会被
      系统停掉（真机踩坑：切到相机后小窗静止），定时器最坏被节流也不至于全停。 */
   function stepScroll(ts) {
+    if (drag.active) { player.lastTs = ts; return true; }  // 拖动中手动优先，自动滚动让路（只刷新时钟）
     if (!player.lastTs) player.lastTs = ts;
     var dt = Math.min(ts - player.lastTs, 100);
     player.lastTs = ts;
@@ -680,6 +681,40 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   $('stage').addEventListener('touchend', pinchEnd);
   $('stage').addEventListener('touchcancel', pinchEnd);
 
+  /* ---- 单指上下拖动：手动滚文案（全屏拖，小窗共用同一 offset 同步跳转） ---- */
+  var drag = { active: false, startY: 0, startOff: 0, moved: false };
+  $('stage').addEventListener('touchstart', function (e) {
+    if (e.touches.length !== 1 || pinch.active) return;
+    drag.active = true; drag.moved = false;
+    drag.startY = e.touches[0].clientY;
+    drag.startOff = player.offset;
+  }, { passive: true });
+  $('stage').addEventListener('touchmove', function (e) {
+    if (!drag.active || e.touches.length !== 1) return;
+    var dy = e.touches[0].clientY - drag.startY;
+    if (!drag.moved && Math.abs(dy) < 10) return;        // 10px 内不算拖动，留给"点按暂停"
+    drag.moved = true;
+    if (player.done && dy > 0) {                          // 拖回去 = 撤销完成态
+      player.done = false;
+      $('doneOverlay').hidden = true;
+      updatePlayBtn();
+    }
+    player.offset = clamp(drag.startOff - dy, 0, player.maxScroll);
+    applyOffset();
+    setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
+    if (pip.active) pipDraw(true);                        // 小窗跟手
+  }, { passive: true });
+  function dragEnd() {
+    if (!drag.active) return;
+    drag.active = false;
+    if (drag.moved) {
+      pinch.swallowUntil = Date.now() + 300;              // 拖动抬起的合成 click 吞掉
+      player.lastTs = 0;                                  // dt 重新起算，恢复播放不跳帧
+    }
+  }
+  $('stage').addEventListener('touchend', dragEnd);
+  $('stage').addEventListener('touchcancel', dragEnd);
+
   /* ---- 底部控制条 ---- */
   $('btnPlay').addEventListener('click', function () {
     if (player.counting) { cancelCountdown(); return; }
@@ -703,7 +738,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     applyOffset();
     setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
     updatePlayBtn();
-    if (pip.active) pipTickOn();                        // 滚完后定时器已停，倒退后重启（否则小窗卡死）
+    if (pip.active) pipTickOn();                        // 兜底：确保小窗期间定时器在跑（幂等）
   });
   function adjustSpeed(delta) {
     prefs.speed = clamp(prefs.speed + delta, 10, 200);
@@ -833,14 +868,15 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   }
   /* 小窗驱动循环：rAF 在后台页面会被系统停掉（真机踩坑：切到相机后小窗静止不滚），
      改用 setInterval——带活跃媒体会话的页面后台定时器仍可运行（最坏被节流到约 1 次/秒，
-     慢但不会停）。前台也统一用它，与 rAF 并行会双倍速。 */
+     慢但不会停）。前台也统一用它，与 rAF 并行会双倍速。
+     滚完也不停表：captureStream 长时间无新帧可能被系统判为流停滞 → 小窗黑屏（真机踩坑），
+     脏检查让空转成本近零。 */
   function pipTickOn() {
     if (pip.tickId) return;
     pip.tickId = setInterval(function () {
       if (!pip.active) { pipTickOff(); return; }
       if (player.playing) stepScroll(performance.now());
       pipDraw(false);                                  // 脏检查：没变化就跳过重绘
-      if (player.done) pipTickOff();                   // 滚完停表省电（重播时再启）
     }, 30);
   }
   function pipTickOff() {
@@ -876,6 +912,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
       }
     } catch (e) { }
     pip.csStream = null; pip.stream = null;
+    pip.canvas = null; pip.ctx = null;                  // 画布随流一起丢弃：下次进入全新建（防死流）
   }
   function exitPip() {
     try {
@@ -907,11 +944,12 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
           else onPipLeave();
         });
       }
-      if (!pip.canvas) {
-        pip.canvas = document.createElement('canvas');
-        pip.canvas.width = 1280; pip.canvas.height = 720;   // 16:9 横向小窗：竖屏录像时横在画面上/下沿更顺手
-        pip.ctx = pip.canvas.getContext('2d');
-      }
+      /* 每次进入都新建 canvas：同一 canvas 上旧 captureStream 的轨被 stop 后，
+         再取流会拿到空流/死流（真机踩坑：退出后重进小窗，readyState 恒 0、请求发不出） */
+      pip.canvas = document.createElement('canvas');
+      pip.canvas.width = 1280; pip.canvas.height = 720;   // 16:9 横向小窗：竖屏录像时横在画面上/下沿更顺手
+      pip.ctx = pip.canvas.getContext('2d');
+      pip.wrapKey = ''; pip.lines = null; pip.lastOff = -1;
       var tracks = [];
       if (pip.canvas.captureStream) {
         pip.csStream = pip.canvas.captureStream(30);
