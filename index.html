@@ -515,9 +515,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
 
   /* 滚动引擎：requestAnimationFrame + 按帧间隔补偿。
      速度单位 px/s，dt 补偿后 60Hz 与 120Hz ProMotion 屏速度完全一致；
-     dt 上限 100ms，防止切后台回来一帧跳过一大段。 */
-  function frame(ts) {
-    if (!player.playing) { player.rafId = 0; return; }
+     dt 上限 100ms，防止切后台回来一帧跳过一大段。
+     小窗（PiP）激活时由 setInterval 驱动（见 pipTickOn）——后台页面 rAF 会被
+     系统停掉（真机踩坑：切到相机后小窗静止），定时器最坏被节流也不至于全停。 */
+  function stepScroll(ts) {
     if (!player.lastTs) player.lastTs = ts;
     var dt = Math.min(ts - player.lastTs, 100);
     player.lastTs = ts;
@@ -526,18 +527,24 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
       player.offset = player.maxScroll;
       applyOffset();
       finishPlay();
-      return;
+      return false;                                     // 已到头，别再排下一帧
     }
     applyOffset();
     setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
-    player.rafId = requestAnimationFrame(frame);
+    return true;
+  }
+  function frame(ts) {
+    if (!player.playing) { player.rafId = 0; return; }
+    if (pip.active) { player.rafId = 0; return; }       // PiP 期间由 pipTick 全权驱动，避免双倍速
+    if (stepScroll(ts)) player.rafId = requestAnimationFrame(frame);
   }
 
   function startPlay() {
     if (player.maxScroll <= 0) { toast('脚本为空，无法开始'); return; }
     player.playing = true;
     player.lastTs = 0;
-    if (!player.rafId) player.rafId = requestAnimationFrame(frame);
+    if (pip.active) { pipTickOn(); }                    // 小窗期间由定时器驱动
+    else if (!player.rafId) player.rafId = requestAnimationFrame(frame);
     updatePlayBtn();
     scheduleHide();
   }
@@ -696,6 +703,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     applyOffset();
     setProgress(player.maxScroll > 0 ? player.offset / player.maxScroll : 0);
     updatePlayBtn();
+    if (pip.active) pipTickOn();                        // 滚完后定时器已停，倒退后重启（否则小窗卡死）
   });
   function adjustSpeed(delta) {
     prefs.speed = clamp(prefs.speed + delta, 10, 200);
@@ -749,8 +757,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     csStream: null,       // canvas 的 captureStream（退出时停轨省电）
     stream: null,         // 视频轨 + 静音音轨的合成流
     audioCtx: null, audioDest: null,
-    rafId: 0,
-    wantPlay: false,      // 进入小窗前是否在播放（用于进入后自动续播）
+    tickId: 0,           // 小窗定时器驱动（rAF 后台会停）
     wrapKey: '', lines: null, lastOff: -1
   };
   function pipSupportOk() {
@@ -786,14 +793,15 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   }
 
   /* 把当前提词画面画到 canvas：黑底 + 按同一 offset 排版文本 + 阅读线。
-     字号 = prefs.fontSize * (canvas 高 / 舞台高)，保证小窗内视觉字号比例与全屏一致。 */
+     横向画布按宽度对齐全屏（scale = 画布宽/舞台宽）：小窗一行显示的字数与全屏
+     一致、行数少但字大清楚；总滚动量同比放大，读完用时与全屏几乎相同（<2% 差异）。 */
   function pipDraw(force) {
     if (!pip.ctx) return;
     var c = pip.canvas, ctx = pip.ctx;
     var cw = c.width, ch = c.height;
     var stage = $('stage');
     var sh = stage.clientHeight || 1, sw = stage.clientWidth || 1;
-    var scale = ch / sh;
+    var scale = cw / sw;
     var fontPx = prefs.fontSize * scale;
     var padX = Math.max(4, Math.round(22 * cw / sw));   // 对应 DOM 的左右 22px padding
     var maxW = cw - padX * 2;
@@ -823,11 +831,20 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     ctx.fillStyle = 'rgba(96,165,250,.6)';              // 阅读线：与全屏样式同色
     ctx.fillRect(0, Math.round(ch * READ_POS), cw, 2);
   }
-  /* 小窗渲染循环：独立于主 frame()，即使主滚动暂停也持续跑（字号可能变），脏检查兜住功耗 */
-  function pipFrame() {
-    if (!pip.active) { pip.rafId = 0; return; }
-    pipDraw(false);
-    pip.rafId = requestAnimationFrame(pipFrame);
+  /* 小窗驱动循环：rAF 在后台页面会被系统停掉（真机踩坑：切到相机后小窗静止不滚），
+     改用 setInterval——带活跃媒体会话的页面后台定时器仍可运行（最坏被节流到约 1 次/秒，
+     慢但不会停）。前台也统一用它，与 rAF 并行会双倍速。 */
+  function pipTickOn() {
+    if (pip.tickId) return;
+    pip.tickId = setInterval(function () {
+      if (!pip.active) { pipTickOff(); return; }
+      if (player.playing) stepScroll(performance.now());
+      pipDraw(false);                                  // 脏检查：没变化就跳过重绘
+      if (player.done) pipTickOff();                   // 滚完停表省电（重播时再启）
+    }, 30);
+  }
+  function pipTickOff() {
+    if (pip.tickId) { clearInterval(pip.tickId); pip.tickId = 0; }
   }
   function onPipEnter() {
     if (pip.active) return;                             // 标准/webkit 两套事件去重
@@ -835,17 +852,21 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     $('pipOverlay').hidden = false;
     $('btnPip').classList.add('on');
     pip.lastOff = -1;                                   // 强制进入后第一帧重绘
-    if (!pip.rafId) pip.rafId = requestAnimationFrame(pipFrame);
-    /* 进 PiP 的瞬间浏览器可能把本页切到后台，触发"切后台自动暂停"——
-       但进小窗的意图就是要它继续滚：若刚才在播而现在被停，自动续播 */
-    if (pip.wantPlay && !player.playing && !player.done && player.maxScroll > 0) startPlay();
+    /* 进小窗的意图就是提词：未在播放且未完成时自动开始滚（真机反馈：弹了窗等人回页点播放，不直观） */
+    if (!player.playing && !player.done && player.maxScroll > 0) startPlay();
+    /* 主滚动 rAF 让位给定时器驱动，避免双驱动双倍速 */
+    if (player.rafId) { cancelAnimationFrame(player.rafId); player.rafId = 0; }
+    pipTickOn();
+    pipDraw(true);
   }
   function onPipLeave() {
     if (!pip.active) return;
     pip.active = false;
     $('pipOverlay').hidden = true;
     $('btnPip').classList.remove('on');
-    if (pip.rafId) { cancelAnimationFrame(pip.rafId); pip.rafId = 0; }
+    pipTickOff();
+    /* 回前台：仍在播放态就恢复 rAF 驱动（比定时器顺滑） */
+    if (player.playing && !player.rafId) { player.lastTs = 0; player.rafId = requestAnimationFrame(frame); }
     /* 全屏 DOM 渲染从未停过，无需恢复；断开媒体流、停掉视频轨省电 */
     try { if (pip.video) pip.video.srcObject = null; } catch (e) { }
     try {
@@ -869,7 +890,6 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   }
   function enterPip() {
     if (!pipSupportOk()) { toast('当前设备不支持小窗'); return; }
-    pip.wantPlay = player.playing;                      // 供 onPipEnter 判断是否需要自动续播
     try {
       var v = pip.video;
       if (!v) {
@@ -889,7 +909,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
       }
       if (!pip.canvas) {
         pip.canvas = document.createElement('canvas');
-        pip.canvas.width = 720; pip.canvas.height = 1280;   // 9:16 竖屏小窗
+        pip.canvas.width = 1280; pip.canvas.height = 720;   // 16:9 横向小窗：竖屏录像时横在画面上/下沿更顺手
         pip.ctx = pip.canvas.getContext('2d');
       }
       var tracks = [];

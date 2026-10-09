@@ -1,7 +1,7 @@
 /* 提词器 Service Worker：部署到 HTTP(S) 后提供真离线能力。
    策略：HTML 走 network-first（保证代码更新即时生效，断网回退缓存），
    图标等静态资源 cache-first。缓存名带版本号，激活时清掉旧版本。 */
-var CACHE = 'teleprompter-v3';
+var CACHE = 'teleprompter-v4';
 var ASSETS = ['./', './index.html', './icon.png'];
 
 self.addEventListener('install', function (e) {
