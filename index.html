@@ -150,6 +150,9 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   align-items:center;justify-content:center;gap:10px;background:rgba(0,0,0,.8)}
 .done-text{font-size:26px;font-weight:700;color:#fff}
 .done-sub{font-size:15px;color:#9aa1ad}
+/* 画中画期间舞台上的提示层（复用完成遮罩的样式思路） */
+.pip-overlay{position:absolute;inset:0;z-index:9;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:10px;background:rgba(0,0,0,.8);cursor:pointer}
 
 /* 底部控制条 */
 .controls{
@@ -171,6 +174,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
 .ctl-row .ctl-play:active{background:#2568dd}
 .ctl-row .toggle.on{background:#123a75;color:#7fb5ff;box-shadow:inset 0 0 0 1px #2f5fb0}
 .ctl-adjust{justify-content:space-around}
+/* 第一行 6 个按钮挤：收窄字号/内边距/间距，375px（iPhone SE）单行也放得下 */
+.ctl-row.ctl-main{gap:5px}
+.ctl-row.ctl-main button{font-size:13px;padding:10px 5px;min-width:38px}
+.ctl-row.ctl-main .ctl-play{font-size:15px;min-width:44px}
 .adj{display:flex;align-items:center;gap:2px;background:#1a1c24;border-radius:10px;padding:2px}
 .adj button{min-width:48px;min-height:42px;font-size:17px}
 .adj-val{display:flex;flex-direction:column;align-items:center;min-width:56px;padding:0 4px}
@@ -186,6 +193,8 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
 
 /* 常亮兜底用的隐形视频（1px 级别、近乎透明，但不能 display:none，否则 iOS 会暂停它） */
 #keepAwakeVideo{position:fixed;right:0;bottom:0;width:2px;height:2px;opacity:.001;pointer-events:none;z-index:0}
+/* 画中画载体视频：同样不能 display:none（媒体流会被暂停），保持 1px 级占位 */
+#pipVideo{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none;z-index:0}
 </style>
 </head>
 <body>
@@ -240,14 +249,19 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
       <div class="done-text">已完成</div>
       <div class="done-sub">点击任意处返回编辑</div>
     </div>
+    <div class="pip-overlay" id="pipOverlay" hidden>
+      <div class="done-text">小窗提词中</div>
+      <div class="done-sub">回到本页可调速度 / 暂停<br>点击此处退出小窗</div>
+    </div>
   </div>
   <div class="controls" id="controls">
-    <div class="ctl-row">
+    <div class="ctl-row ctl-main">
       <button id="btnExit">返回</button>
       <button id="btnBackScreen">倒退一屏</button>
       <button id="btnPlay" class="ctl-play">播放</button>
       <button id="btnCountdown" class="toggle">倒计时 关</button>
       <button id="btnMirror" class="toggle">镜像 关</button>
+      <button id="btnPip" class="toggle">小窗</button>
     </div>
     <div class="ctl-row ctl-adjust">
       <div class="adj">
@@ -309,7 +323,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     try {
       var raw = JSON.parse(lsGet(PREFS_KEY) || 'null');
       if (raw && typeof raw === 'object') {
-        if (typeof raw.fontSize === 'number') out.fontSize = clamp(raw.fontSize, 24, 120);
+        if (typeof raw.fontSize === 'number') out.fontSize = clamp(raw.fontSize, 16, 120);
         if (typeof raw.speed === 'number')   out.speed   = clamp(raw.speed, 10, 200);
         out.countdown = !!raw.countdown;
         out.mirror    = !!raw.mirror;
@@ -590,6 +604,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     player.offset = 0; player.lastTs = 0;
     $('doneOverlay').hidden = true;
     $('countdownOverlay').hidden = true;
+    $('pipOverlay').hidden = true;
     showView('play');       // 先显示视图，stage 才有真实尺寸
     layoutPlayer();
     applyOffset();
@@ -601,8 +616,10 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   function exitPlay() {
     if (player.counting) cancelCountdown();
     pausePlay();
+    exitPip();                                // 若正处小窗，先退出（内部自带 try/catch）
     keepAwakeOff();
     $('doneOverlay').hidden = true;
+    $('pipOverlay').hidden = true;
     showView('edit');
   }
   $('btnExit').addEventListener('click', exitPlay);
@@ -610,6 +627,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
 
   /* ---- 舞台点击：暂停/继续 ---- */
   $('stage').addEventListener('click', function () {
+    if (Date.now() < pinch.swallowUntil) return;    // 双指捏合刚结束，吞掉误触的 click
     if (player.counting) { cancelCountdown(); return; }
     if (player.done) return;                       // 完成遮罩自己处理
     if (player.playing) {
@@ -622,6 +640,38 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   });
   /* 阻断舞台上的触摸滚动链，保证固定视口不被拖动 */
   $('stage').addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+
+  /* ---- 双指捏合调字号（播放页手势） ---- */
+  var pinch = { active: false, startDist: 0, startFont: 0, swallowUntil: 0, lastToast: 0 };
+  function touchDist(t) {
+    var dx = t[0].clientX - t[1].clientX, dy = t[0].clientY - t[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+  $('stage').addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) {
+      var d = touchDist(e.touches);
+      if (d > 0) { pinch.active = true; pinch.startDist = d; pinch.startFont = prefs.fontSize; }
+    }
+  }, { passive: true });
+  $('stage').addEventListener('touchmove', function (e) {
+    if (!pinch.active || e.touches.length < 2) return;
+    var d = touchDist(e.touches);
+    if (!(d > 0) || !(pinch.startDist > 0)) return;
+    var old = prefs.fontSize;
+    setFontSize(pinch.startFont * d / pinch.startDist, false);   // 捏合中只改内存，松手统一落盘
+    if (prefs.fontSize !== old && Date.now() - pinch.lastToast > 400) {
+      pinch.lastToast = Date.now();
+      toast('字号 ' + prefs.fontSize);                            // 节流提示，别每帧弹
+    }
+  }, { passive: true });
+  function pinchEnd(e) {
+    if (!pinch.active || e.touches.length >= 2) return;           // 还有手指在屏上就不算结束
+    pinch.active = false;
+    pinch.swallowUntil = Date.now() + 300;                        // 双指抬起的合成 click 要吞掉
+    savePrefs();
+  }
+  $('stage').addEventListener('touchend', pinchEnd);
+  $('stage').addEventListener('touchcancel', pinchEnd);
 
   /* ---- 底部控制条 ---- */
   $('btnPlay').addEventListener('click', function () {
@@ -652,12 +702,17 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     savePrefs();
     syncControlsUI();
   }
-  function adjustFont(delta) {
-    prefs.fontSize = clamp(prefs.fontSize + delta, 24, 120);
-    savePrefs();
+  /* 字号统一落点：按钮步进与双指捏合共用；改完保持 offset 重排（重算 maxScroll）。
+     save=false 时暂不写存储（捏合过程中高频调用，松手统一存）。 */
+  function setFontSize(v, save) {
+    var f = clamp(Math.round(v), 16, 120);           // 字号范围 16~120
+    if (f === prefs.fontSize) return;
+    prefs.fontSize = f;
     syncControlsUI();
     if (currentView === 'play') { layoutPlayer(); applyOffset(); }   // 字号变了要重算总高度
+    if (save !== false) savePrefs();
   }
+  function adjustFont(delta) { setFontSize(prefs.fontSize + delta); }
   $('btnSpeedDown').addEventListener('click', function () { adjustSpeed(-10); });
   $('btnSpeedUp').addEventListener('click', function () { adjustSpeed(10); });
   $('btnFontDown').addEventListener('click', function () { adjustFont(-8); });
@@ -679,6 +734,205 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     $('btnMirror').classList.toggle('on', prefs.mirror);
     $('teleText').style.fontSize = prefs.fontSize + 'px';
   }
+
+  /* ==================== 画中画小窗（PiP） ====================
+     场景：用相机 app 录视频时，提词文字以系统画中画小窗悬浮滚动。
+     思路：离屏 canvas 逐帧画提词画面 → captureStream 当视频源，
+     再用 WebAudio 造一条静音音轨合并进去（iOS Safari 的 PiP 要求视频带音轨），
+     塞进一个隐藏 video 后请求画中画。滚动数据与全屏共用同一 player.offset，
+     在本页暂停/调速，小窗实时同步。 */
+  var PIP_FONT = '-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif';
+  var pip = {
+    active: false,        // 是否处于小窗
+    video: null,          // 隐藏的 PiP 载体视频
+    canvas: null, ctx: null,
+    csStream: null,       // canvas 的 captureStream（退出时停轨省电）
+    stream: null,         // 视频轨 + 静音音轨的合成流
+    audioCtx: null, audioDest: null,
+    rafId: 0,
+    wrapKey: '', lines: null, lastOff: -1
+  };
+  function pipSupportOk() {
+    if (document.pictureInPictureEnabled) return true;          // 标准 API（Chrome / 新版 Safari）
+    var v = pip.video || document.createElement('video');        // iOS Safari 只在 video 实例上暴露 webkit 探测属性
+    return !!(v && v.webkitSupportsPictureInPicture);
+  }
+  function pipActiveNow() {
+    if (document.pictureInPictureElement) return true;
+    var v = pip.video;
+    return !!(v && v.webkitPresentationMode === 'picture-in-picture');
+  }
+  function pipFontStr(px) { return px.toFixed(1) + 'px ' + PIP_FONT; }
+
+  /* 逐字符测宽换行（中文场景按字断行即可，不做英文单词断行） */
+  function pipWrap(text, fontPx, maxW) {
+    var ctx = pip.ctx;
+    ctx.font = pipFontStr(fontPx);
+    var out = [];
+    var paras = String(text).split('\n');
+    for (var i = 0; i < paras.length; i++) {
+      var s = paras[i];
+      if (!s) { out.push(''); continue; }               // 空行占一行，对应 DOM 的 pre-wrap
+      var line = '';
+      for (var j = 0; j < s.length; j++) {
+        var next = line + s.charAt(j);
+        if (line && ctx.measureText(next).width > maxW) { out.push(line); line = s.charAt(j); }
+        else line = next;
+      }
+      out.push(line);
+    }
+    return out;
+  }
+
+  /* 把当前提词画面画到 canvas：黑底 + 按同一 offset 排版文本 + 阅读线。
+     字号 = prefs.fontSize * (canvas 高 / 舞台高)，保证小窗内视觉字号比例与全屏一致。 */
+  function pipDraw(force) {
+    if (!pip.ctx) return;
+    var c = pip.canvas, ctx = pip.ctx;
+    var cw = c.width, ch = c.height;
+    var stage = $('stage');
+    var sh = stage.clientHeight || 1, sw = stage.clientWidth || 1;
+    var scale = ch / sh;
+    var fontPx = prefs.fontSize * scale;
+    var padX = Math.max(4, Math.round(22 * cw / sw));   // 对应 DOM 的左右 22px padding
+    var maxW = cw - padX * 2;
+    var text = $('teleText').textContent || '';
+    var key = pipFontStr(fontPx) + '|' + maxW + '|' + text.length;
+    if (key !== pip.wrapKey) { pip.wrapKey = key; pip.lines = pipWrap(text, fontPx, maxW); }
+    var off = player.offset * scale;                    // 与全屏 DOM 共用同一滚动量
+    if (!force && Math.abs(off - pip.lastOff) < 0.5) return;   // 脏检查：没动就跳过重绘
+    pip.lastOff = off;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cw, ch);
+    if (prefs.mirror) ctx.setTransform(-1, 0, 0, 1, cw, 0);    // 镜像模式与全屏 DOM 保持一致
+    ctx.font = pipFontStr(fontPx);
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    var lh = fontPx * 1.72;                             // 与 DOM line-height 1.72 对齐
+    var y0 = ch * READ_POS - off;                       // 第 0 行顶边 = 阅读线位置 − 滚动量
+    var lines = pip.lines || [];
+    for (var i = 0; i < lines.length; i++) {
+      var top = y0 + i * lh;
+      if (top + lh < 0) continue;                       // 还没滚进画面
+      if (top > ch) break;                              // 已滚出画面
+      if (lines[i]) ctx.fillText(lines[i], padX, top + lh / 2);
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = 'rgba(96,165,250,.6)';              // 阅读线：与全屏样式同色
+    ctx.fillRect(0, Math.round(ch * READ_POS), cw, 2);
+  }
+  /* 小窗渲染循环：独立于主 frame()，即使主滚动暂停也持续跑（字号可能变），脏检查兜住功耗 */
+  function pipFrame() {
+    if (!pip.active) { pip.rafId = 0; return; }
+    pipDraw(false);
+    pip.rafId = requestAnimationFrame(pipFrame);
+  }
+  function onPipEnter() {
+    if (pip.active) return;                             // 标准/webkit 两套事件去重
+    pip.active = true;
+    $('pipOverlay').hidden = false;
+    $('btnPip').classList.add('on');
+    pip.lastOff = -1;                                   // 强制进入后第一帧重绘
+    if (!pip.rafId) pip.rafId = requestAnimationFrame(pipFrame);
+  }
+  function onPipLeave() {
+    if (!pip.active) return;
+    pip.active = false;
+    $('pipOverlay').hidden = true;
+    $('btnPip').classList.remove('on');
+    if (pip.rafId) { cancelAnimationFrame(pip.rafId); pip.rafId = 0; }
+    /* 全屏 DOM 渲染从未停过，无需恢复；断开媒体流、停掉视频轨省电 */
+    try { if (pip.video) pip.video.srcObject = null; } catch (e) { }
+    try {
+      if (pip.csStream) {
+        var ts = pip.csStream.getVideoTracks();
+        for (var i = 0; i < ts.length; i++) ts[i].stop();
+      }
+    } catch (e) { }
+    pip.csStream = null; pip.stream = null;
+  }
+  function exitPip() {
+    try {
+      if (document.pictureInPictureElement && document.exitPictureInPicture) document.exitPictureInPicture();
+    } catch (e) { /* 忽略 */ }
+    try {
+      var v = pip.video;
+      if (v && v.webkitPresentationMode === 'picture-in-picture' && v.webkitSetPresentationMode) {
+        v.webkitSetPresentationMode('inline');
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+  function enterPip() {
+    if (!pipSupportOk()) { toast('当前设备不支持小窗'); return; }
+    try {
+      var v = pip.video;
+      if (!v) {
+        v = document.createElement('video');
+        v.id = 'pipVideo';
+        v.muted = true;
+        v.setAttribute('playsinline', '');              // 没有它 iOS 不给内联播放
+        document.body.appendChild(v);
+        pip.video = v;
+        /* 两套事件都挂：标准 API 用 enter/leave，iOS Safari webkit 路径用 presentationmodechanged */
+        v.addEventListener('enterpictureinpicture', onPipEnter);
+        v.addEventListener('leavepictureinpicture', onPipLeave);
+        v.addEventListener('webkitpresentationmodechanged', function () {
+          if (v.webkitPresentationMode === 'picture-in-picture') onPipEnter();
+          else onPipLeave();
+        });
+      }
+      if (!pip.canvas) {
+        pip.canvas = document.createElement('canvas');
+        pip.canvas.width = 720; pip.canvas.height = 1280;   // 9:16 竖屏小窗
+        pip.ctx = pip.canvas.getContext('2d');
+      }
+      var tracks = [];
+      if (pip.canvas.captureStream) {
+        pip.csStream = pip.canvas.captureStream(30);
+        tracks = pip.csStream.getVideoTracks();
+      }
+      if (!tracks.length) { toast('当前设备不支持小窗'); return; }
+      /* iOS Safari 关键坑：PiP 要求视频带音轨 → WebAudio 造静音音轨（0Hz + 0 增益双保险）。
+         AudioContext 的创建与 resume 都必须在用户手势内同步完成。 */
+      try {
+        var AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          if (!pip.audioCtx) {
+            pip.audioCtx = new AC();
+            pip.audioDest = pip.audioCtx.createMediaStreamDestination();
+            var osc = pip.audioCtx.createOscillator();
+            osc.frequency.value = 0;
+            var gain = pip.audioCtx.createGain();
+            gain.gain.value = 0;
+            osc.connect(gain); gain.connect(pip.audioDest);
+            osc.start();
+          }
+          if (pip.audioCtx.state === 'suspended' && pip.audioCtx.resume) pip.audioCtx.resume();
+          var at = pip.audioDest.stream.getAudioTracks()[0];
+          if (at) tracks.push(at);
+        }
+      } catch (e2) { /* 造不出音轨也继续试，部分环境无音轨也能进 */ }
+      pip.stream = new MediaStream(tracks);
+      v.srcObject = pip.stream;
+      pipDraw(true);                                    // 先画一帧，避免小窗打开瞬间黑屏
+      v.play();
+      /* requestPiP 必须留在用户手势调用栈里，不能等 play() 的 Promise */
+      if (document.pictureInPictureEnabled && v.requestPictureInPicture) {
+        var p = v.requestPictureInPicture();
+        if (p && p.catch) p.catch(function () { toast('进入小窗失败'); });
+      } else if (v.webkitSupportsPictureInPicture && v.webkitSetPresentationMode) {
+        v.webkitSetPresentationMode('picture-in-picture');
+      } else {
+        toast('当前设备不支持小窗');
+      }
+    } catch (e) { toast('进入小窗失败'); }
+  }
+  $('btnPip').addEventListener('click', function () {
+    if (pip.active || pipActiveNow()) { exitPip(); return; }
+    enterPip();
+  });
+  $('pipOverlay').addEventListener('click', function (e) { e.stopPropagation(); exitPip(); });
 
   /* ---- 控制条显隐：4 秒无操作淡出；仅播放中隐藏，暂停时保持可见方便调整 ---- */
   var hideTimer = 0;
@@ -739,6 +993,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'hidden') {
       if (player.counting) cancelCountdown();
+      if (pip.active) return;                 // 小窗提词中切到相机等 app：不自动暂停，让小窗继续滚
       if (player.playing) { pausePlay(); toast('已暂停'); }
     } else if (currentView === 'play') {
       requestWakeLock();
