@@ -929,7 +929,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     if (isStandalone()) {
       /* iOS 主屏幕独立模式（桌面图标）不支持画中画：视频永远 not ready，请求必被拒
          （真机踩坑：报 InvalidStateError）。给出明确指引而不是英文报错。 */
-      toast('桌面图标模式不支持小窗：请在 Safari 标签页打开本页使用，或改用 maker 生成的提词视频', 4000);
+      toast('桌面图标模式不支持小窗：请在 Safari 标签页打开本页使用', 4000);
       return;
     }
     if (!pipSupportOk()) { toast('当前设备不支持小窗'); return; }
