@@ -807,7 +807,7 @@ button{font:inherit;color:inherit;background:none;border:none;cursor:pointer;tou
     var maxW = cw - padX * 2;
     var text = $('teleText').textContent || '';
     var key = pipFontStr(fontPx) + '|' + maxW + '|' + text.length;
-    if (key !== pip.wrapKey) { pip.wrapKey = key; pip.lines = pipWrap(text, fontPx, maxW); }
+    if (key !== pip.wrapKey) { pip.wrapKey = key; pip.lines = pipWrap(text, fontPx, maxW); pip.lastOff = -1; }   // 字号/宽度变了：重排并强制重绘（暂停中调字号小窗也要跟着变）
     var off = player.offset * scale;                    // 与全屏 DOM 共用同一滚动量
     if (!force && Math.abs(off - pip.lastOff) < 0.5) return;   // 脏检查：没动就跳过重绘
     pip.lastOff = off;
