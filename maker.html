@@ -1,0 +1,593 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>提词视频生成器</title>
+<style>
+/* ==================== 基础（配色与主应用 index.html 一致） ==================== */
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{min-height:100%}
+body{
+  background:#0b0c10;color:#ececf1;
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif;
+  -webkit-font-smoothing:antialiased;
+  padding-bottom:150px;                    /* 让出底部固定说明区的高度 */
+}
+button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
+/* 防御：遮罩类元素自带 display，必须强制压住 [hidden]（同 index.html 的教训） */
+[hidden]{display:none!important}
+
+/* ==================== 顶栏 ==================== */
+.topbar{
+  display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+  max-width:1120px;margin:0 auto;padding:22px 20px 4px;
+}
+.topbar h1{font-size:22px;font-weight:700;letter-spacing:.5px}
+.topbar .sub{font-size:13px;color:#8b93a1;flex:1;min-width:200px}
+
+/* ==================== 主区：左表单 / 右预览 ==================== */
+.wrap{display:flex;gap:18px;max-width:1120px;margin:0 auto;padding:14px 20px 0;align-items:flex-start}
+.col-form{flex:1.15;min-width:0}
+.col-out{flex:1;min-width:0;display:flex;flex-direction:column;gap:12px}
+@media (max-width:900px){.wrap{flex-direction:column}}
+
+/* 表单整体（fieldset 便于录制中一键禁用全部控件） */
+fieldset{border:none;width:100%;display:flex;flex-direction:column;gap:16px}
+fieldset:disabled{opacity:.55;pointer-events:none}
+.lbl{display:block;font-size:13px;color:#8b93a1;margin-bottom:7px}
+.inp{
+  width:100%;background:#15161c;border:1px solid #23252e;border-radius:10px;
+  color:#fff;font-size:16px;padding:11px 12px;outline:none;
+}
+.inp:focus{border-color:#2f7bff}
+/* 正文字号 >= 16px（桌面无 iOS 聚焦放大问题，但保持阅读舒适） */
+.inp-text{
+  min-height:300px;resize:vertical;line-height:1.8;color:#e8eaf0;
+}
+
+/* 参数行（速度 / 字号） */
+.params{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media (max-width:620px){.params{grid-template-columns:1fr}}
+.param-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}
+.param-head label{font-size:13px;color:#8b93a1}
+.param-val{display:flex;align-items:center;gap:4px}
+.param-val input{
+  width:64px;text-align:right;background:#15161c;border:1px solid #23252e;border-radius:8px;
+  color:#fff;font-size:15px;padding:5px 7px;outline:none;
+}
+.param-val input:focus{border-color:#2f7bff}
+.param-val i{font-style:normal;font-size:12px;color:#6d7684}
+input[type=range]{width:100%;accent-color:#2f7bff;cursor:pointer}
+
+/* 方向二选一（分段按钮） */
+.param-dir{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.param-dir .lbl{margin:0;margin-right:4px}
+.seg{cursor:pointer}
+.seg input{position:absolute;opacity:0;pointer-events:none}
+.seg span{
+  display:inline-block;padding:9px 14px;border-radius:10px;font-size:14px;color:#c8ceda;
+  background:#1a1c24;border:1px solid transparent;
+}
+.seg input:checked + span{background:#123a75;color:#7fb5ff;box-shadow:inset 0 0 0 1px #2f5fb0}
+
+/* ==================== 预览画布（预览与录制共用一个槽位） ==================== */
+.cv-slot{display:flex;justify-content:center}
+/* canvas 是替换元素：max-width/max-height 同时约束时浏览器会等比缩放，保持宽高比 */
+.cv{
+  max-width:100%;max-height:56vh;width:auto;height:auto;
+  display:block;background:#000;border-radius:12px;border:1px solid #23252e;
+}
+
+/* ==================== 右侧状态区 ==================== */
+.meta{font-size:14px;color:#c9d4e3;line-height:1.7}
+.meta b{color:#7fb5ff;font-weight:600}
+.tiny-hint{font-size:12px;color:#6d7684;margin-top:6px;line-height:1.6}
+.btn-primary{
+  background:#2f7bff;color:#fff;border-radius:10px;padding:13px 16px;
+  font-size:16px;font-weight:600;width:100%;
+}
+.btn-primary:active{background:#2568dd}
+.btn-primary:disabled{background:#253049;color:#8b93a1;cursor:not-allowed}
+.status{display:flex;flex-direction:column;gap:12px}
+
+/* 录制中 */
+.rec-big{font-size:20px;font-weight:700;color:#ffd479;text-align:center;line-height:1.5}
+.rec-sub{font-size:13px;color:#8b93a1;text-align:center;margin-top:-4px}
+.progress{height:8px;background:rgba(255,255,255,.1);border-radius:4px;overflow:hidden}
+.progress i{display:block;height:100%;width:0;background:#3b82f6}
+.rec-time{font-size:14px;color:#c9d4e3;text-align:center}
+
+/* 完成 */
+.done-title{font-size:18px;font-weight:700;text-align:center}
+.done-meta{font-size:13px;color:#8b93a1;text-align:center;line-height:1.7;word-break:break-all}
+
+/* 警告条 / 不支持提示 */
+.warn{
+  background:rgba(255,107,107,.1);border:1px solid rgba(255,107,107,.35);color:#ffb3b3;
+  padding:10px 12px;border-radius:10px;font-size:13px;line-height:1.7;
+}
+.warn.amber{background:rgba(255,196,87,.08);border-color:rgba(255,196,87,.35);color:#ffd479}
+
+/* ==================== 底部固定：三步说明 ==================== */
+.steps{
+  position:fixed;left:0;right:0;bottom:0;z-index:10;
+  background:#0d0e12;border-top:1px solid #1d1f27;
+  display:flex;gap:20px;padding:14px 22px;flex-wrap:wrap;
+}
+.step{flex:1;min-width:240px;display:flex;gap:10px;align-items:flex-start}
+.step i{
+  flex:none;width:26px;height:26px;border-radius:50%;font-style:normal;
+  background:#2f7bff;color:#fff;font-size:14px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+}
+.step b{display:block;font-size:14px;font-weight:600;margin-bottom:3px}
+.step span{font-size:13px;color:#8b93a1;line-height:1.65}
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <h1>提词视频生成器</h1>
+  <span class="sub">在电脑上把口播稿渲染成滚动的 MP4 视频 → 传到 iPhone → 系统播放器画中画悬浮提词</span>
+</header>
+
+<main class="wrap">
+  <!-- ==================== 左：参数表单 ==================== -->
+  <section class="col-form">
+    <fieldset id="formFields">
+      <div>
+        <label class="lbl" for="inpTitle">标题（用于下载的文件名）</label>
+        <input id="inpTitle" class="inp" type="text" value="未命名" maxlength="60" autocomplete="off">
+      </div>
+      <div>
+        <label class="lbl" for="inpText">口播稿</label>
+        <textarea id="inpText" class="inp inp-text" placeholder="把口播稿粘贴到这里…&#10;&#10;段落之间建议空一行，滚动时更好断句"></textarea>
+      </div>
+      <div class="params">
+        <div>
+          <div class="param-head">
+            <label for="rngSpeed">滚动速度</label>
+            <span class="param-val"><input type="number" id="numSpeed" min="10" max="200" step="1" value="60"><i>px/s</i></span>
+          </div>
+          <input type="range" id="rngSpeed" min="10" max="200" step="1" value="60">
+        </div>
+        <div>
+          <div class="param-head">
+            <label for="rngFont">字号</label>
+            <span class="param-val"><input type="number" id="numFont" min="24" max="120" step="1" value="48"><i>px</i></span>
+          </div>
+          <input type="range" id="rngFont" min="24" max="120" step="1" value="48">
+        </div>
+      </div>
+      <div class="param-dir">
+        <span class="lbl">视频方向</span>
+        <label class="seg"><input type="radio" name="dir" value="h" checked><span>横向 1920×1080（推荐）</span></label>
+        <label class="seg"><input type="radio" name="dir" value="v"><span>竖向 1080×1920</span></label>
+      </div>
+    </fieldset>
+  </section>
+
+  <!-- ==================== 右：预览 + 状态 ==================== -->
+  <section class="col-out">
+    <div class="cv-slot" id="cvSlot"><canvas id="cv" class="cv" width="1920" height="1080"></canvas></div>
+    <div class="status">
+      <div id="statIdle">
+        <div class="meta" id="metaInfo">1920×1080 · 请先在左侧输入口播稿，这里会显示预计时长</div>
+        <div class="tiny-hint">视频结构 = 开头静置 2 秒（留时间切手机、点播放）+ 匀速滚动 + 结尾停留 1 秒。速度与字号的语义和手机版提词器一致（390px 基准视口）。</div>
+        <button id="btnGen" class="btn-primary" style="margin-top:12px">生成 MP4 视频</button>
+      </div>
+      <div id="statRec" hidden>
+        <div class="rec-big">生成中，请保持本页在前台</div>
+        <div class="rec-sub">切换窗口 / 最小化会让画面停帧，本次录制将自动作废</div>
+        <div class="progress"><i id="recBar"></i></div>
+        <div class="rec-time" id="recTime">已录 0.0 秒 / 约 0 秒</div>
+      </div>
+      <div id="statDone" hidden>
+        <div class="done-title">视频已生成，已开始下载</div>
+        <div class="done-meta" id="doneMeta"></div>
+        <button id="btnAgain" class="btn-primary" style="margin-top:4px">再录一次</button>
+      </div>
+      <div id="warnBar" class="warn" hidden>页面不在前台，画面已暂停，请回来重录</div>
+      <div id="unsupportedMsg" class="warn amber" hidden>当前浏览器不支持生成 MP4，请用新版 Chrome 或 Edge 打开本页</div>
+    </div>
+  </section>
+</main>
+
+<!-- ==================== 底部固定：使用三步 ==================== -->
+<footer class="steps">
+  <div class="step"><i>1</i><div><b>发到手机</b><span>用微信 / QQ 把生成的 MP4 发送到 iPhone，点开并「保存到相册」</span></div></div>
+  <div class="step"><i>2</i><div><b>开启画中画</b><span>在相册里全屏播放该视频，点左下角画中画图标（或分享菜单里的「画中画」），视频缩成悬浮小窗</span></div></div>
+  <div class="step"><i>3</i><div><b>切相机开录</b><span>切到相机开始录像：小窗可拖动到合适位置，自带进度条可拖到任意段落、可随时暂停</span></div></div>
+</footer>
+
+<script>
+'use strict';
+(function () {
+  /* ==================== 常量与工具 ==================== */
+  var READ_POS = 0.45;      // 阅读线位置（距顶部 45%，与主应用一致）
+  var LEAD = 2;             // 视频开头静置秒数
+  var TAIL = 1;             // 结尾停留秒数
+  var BASE_W = 390;         // 字号/速度的基准视口宽度（与主应用语义一致）
+  var CANVAS_FONT = '-apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue","Microsoft YaHei",sans-serif';
+  /* 只提供 MP4：iPhone 系统播放器放不了 webm，干脆不给降级选项 */
+  var MIME_CANDIDATES = [
+    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+    'video/mp4'
+  ];
+
+  function $(id) { return document.getElementById(id); }
+  function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+  function fontStr(px) { return px.toFixed(1) + 'px ' + CANVAS_FONT; }
+  function fmtDur(sec) {
+    var s = Math.max(0, Math.round(sec));
+    var m = Math.floor(s / 60), r = s % 60;
+    return m > 0 ? m + ' 分 ' + (r < 10 ? '0' : '') + r + ' 秒' : s + ' 秒';
+  }
+
+  /* ==================== 排版（与主应用 layoutPlayer / pipDraw 数学同构） ====================
+     字号映射：canvasFontPx = 用户字号 × (canvasW / 390)，横竖向都用宽度 390 基准；
+     行高 1.72；左右 padding = 22 × (canvasW/390)。
+     布局：首行顶边从阅读线（H×45%）出现，滚到末行底部回到阅读线结束 ——
+     等价于 DOM 的 padTop=H×45% / padBottom=H×55%，两者相加恰为 H，
+     因此总滚动量 = 正文自身高度 = 行数 × 行高。 */
+
+  /* 逐字符测宽换行（中文场景按字断行即可；空行占一行，对应 DOM 的 pre-wrap） */
+  var measureCtx = document.createElement('canvas').getContext('2d');
+  function wrapText(text, fontPx, maxW) {
+    measureCtx.font = fontStr(fontPx);
+    var out = [];
+    var paras = String(text).split('\n');
+    for (var i = 0; i < paras.length; i++) {
+      var s = paras[i];
+      if (!s) { out.push(''); continue; }
+      var line = '';
+      for (var j = 0; j < s.length; j++) {
+        var next = line + s.charAt(j);
+        if (line && measureCtx.measureText(next).width > maxW) { out.push(line); line = s.charAt(j); }
+        else line = next;
+      }
+      out.push(line);
+    }
+    return out;
+  }
+
+  function computeLayout(text, fontSz, W) {
+    var scale = W / BASE_W;
+    var fontPx = fontSz * scale;
+    var padX = Math.round(22 * scale);
+    var lh = fontPx * 1.72;
+    var lines = wrapText(text, fontPx, W - padX * 2);
+    return {
+      scale: scale, fontPx: fontPx, padX: padX, lh: lh, lines: lines,
+      totalScroll: lines.length * lh          // 总滚动量 = 内容总高
+    };
+  }
+
+  /* 总时长 = 2 + 总滚动量/速度 + 1。速度是 390 基准视口的 px/s，
+     换算到画布实际像素要 ×scale，时长才与手机版提词器读稿节奏一致。 */
+  function calcDuration(layout, speed) {
+    return LEAD + layout.totalScroll / (speed * layout.scale) + TAIL;
+  }
+
+  /* t 秒时刻的滚动量（录制时间轴的核心） */
+  function offsetAt(t, layout, v) {
+    if (t <= LEAD) return 0;
+    return Math.min((t - LEAD) * v, layout.totalScroll);
+  }
+
+  /* 把提词画面画到 canvas：黑底 + 白字 + 阅读线（每帧都画，含静置段） */
+  function drawFrame(ctx, W, H, layout, offset) {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, W, H);
+    ctx.font = fontStr(layout.fontPx);
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#fff';
+    var y0 = H * READ_POS - offset;           // 第 0 行顶边 = 阅读线位置 − 滚动量
+    var lines = layout.lines;
+    for (var i = 0; i < lines.length; i++) {
+      var top = y0 + i * layout.lh;
+      if (top + layout.lh < 0) continue;      // 还没滚进画面（上方）
+      if (top > H) break;                     // 已滚出画面（下方）
+      if (lines[i]) ctx.fillText(lines[i], layout.padX, top + layout.lh / 2);
+    }
+    ctx.fillStyle = 'rgba(96,165,250,.6)';    // 阅读线：与主应用同色
+    ctx.fillRect(0, Math.round(H * READ_POS), W, 2);
+  }
+
+  /* ==================== 表单读取 ==================== */
+  function getSpeed() { return clamp(parseInt($('numSpeed').value, 10) || 60, 10, 200); }
+  function getFontSize() { return clamp(parseInt($('numFont').value, 10) || 48, 24, 120); }
+  function currentDims() {
+    var v = document.querySelector('input[name=dir]:checked');
+    return (v && v.value === 'v') ? { W: 1080, H: 1920 } : { W: 1920, H: 1080 };
+  }
+  var state = { mime: null, W: 1920, H: 1080 };
+
+  /* 滑块 ↔ 数字输入双向同步；输入中只同步滑块不写回（不打断敲字），失焦才归一化 */
+  function bindParam(rngId, numId, min, max, def) {
+    var rng = $(rngId), num = $(numId);
+    rng.addEventListener('input', function () { num.value = rng.value; onParamsChanged(); });
+    num.addEventListener('input', function () {
+      var v = parseInt(num.value, 10);
+      if (!isNaN(v)) rng.value = clamp(v, min, max);
+      onParamsChanged();
+    });
+    num.addEventListener('change', function () {
+      var v = parseInt(num.value, 10);
+      if (isNaN(v)) v = def;
+      v = clamp(v, min, max);
+      num.value = v; rng.value = v;
+      onParamsChanged();
+    });
+  }
+  bindParam('rngSpeed', 'numSpeed', 10, 200, 60);
+  bindParam('rngFont', 'numFont', 24, 120, 48);
+
+  $('inpText').addEventListener('input', onParamsChanged);
+  var dirRadios = document.querySelectorAll('input[name=dir]');
+  for (var di = 0; di < dirRadios.length; di++) {
+    dirRadios[di].addEventListener('change', function () {
+      var d = currentDims();
+      state.W = d.W; state.H = d.H;
+      onParamsChanged();
+    });
+  }
+
+  /* ==================== 预览（第一屏 + 预计时长） ==================== */
+  var cvCtx = null;
+  var layoutTimer = 0;
+  function onParamsChanged() {                // 防抖：长稿逐字符测宽有成本
+    clearTimeout(layoutTimer);
+    layoutTimer = setTimeout(refreshPreview, 100);
+  }
+  function refreshPreview() {
+    var cv = $('cv');
+    if (cv.width !== state.W || cv.height !== state.H) { cv.width = state.W; cv.height = state.H; }
+    if (!cvCtx) cvCtx = cv.getContext('2d');
+    var text = $('inpText').value;
+    var layout = computeLayout(text, getFontSize(), state.W);
+    drawFrame(cvCtx, state.W, state.H, layout, 0);      // 预览只画第一屏（offset=0）
+    if (!text.trim()) {
+      $('metaInfo').textContent = state.W + '×' + state.H + ' · 请先在左侧输入口播稿，这里会显示预计时长';
+      $('btnGen').disabled = true;                      // 空稿不让开始
+    } else {
+      var dur = calcDuration(layout, getSpeed());
+      $('metaInfo').innerHTML = state.W + '×' + state.H + ' · 预计时长约 <b>' + fmtDur(dur) + '</b>';
+      $('btnGen').disabled = !state.mime;
+    }
+  }
+
+  /* ==================== MP4 能力探测 ==================== */
+  function pickMime() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return null;
+    if (!window.HTMLCanvasElement || !HTMLCanvasElement.prototype.captureStream) return null;
+    for (var i = 0; i < MIME_CANDIDATES.length; i++) {
+      try { if (MediaRecorder.isTypeSupported(MIME_CANDIDATES[i])) return MIME_CANDIDATES[i]; } catch (e) { }
+    }
+    return null;
+  }
+
+  /* ==================== 静音音轨 ====================
+     iPhone 系统播放器的画中画对无音轨视频可能不放行，必须有音轨。
+     方案与主应用 PiP 相同：20Hz 次声 + 极低增益（全 0 信号会被部分系统判为无效音轨）。
+     AudioContext 的创建与 resume 都在按钮点击（用户手势）内同步完成。 */
+  var audioCtx = null, audioDest = null;
+  function ensureAudioTrack() {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return null;
+    if (!audioCtx) {
+      audioCtx = new AC();
+      audioDest = audioCtx.createMediaStreamDestination();
+      var osc = audioCtx.createOscillator();
+      osc.frequency.value = 20;
+      var gain = audioCtx.createGain();
+      gain.gain.value = 0.0001;
+      osc.connect(gain); gain.connect(audioDest);
+      osc.start();
+    }
+    if (audioCtx.state === 'suspended' && audioCtx.resume) audioCtx.resume();
+    return audioDest.stream.getAudioTracks()[0] || null;
+  }
+
+  /* ==================== 录制 ==================== */
+  var rec = {
+    active: false, discarded: false, stopped: false,
+    canvas: null, ctx: null, stream: null, recorder: null, chunks: [],
+    layout: null, v: 0, total: 0, t0: 0, rafId: 0
+  };
+
+  function setState(name) {
+    $('statIdle').hidden = name !== 'idle';
+    $('statRec').hidden = name !== 'recording';
+    $('statDone').hidden = name !== 'done';
+  }
+
+  function buildFileName(title) {
+    var t = (title || '').trim() || '未命名';
+    t = t.replace(/[\\\/:*?"<>|\x00-\x1f]/g, '_');      // 两端文件系统的非法字符统一换下划线
+    var d = new Date();
+    function p(x) { return (x < 10 ? '0' : '') + x; }
+    var stamp = '' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '-' + p(d.getHours()) + p(d.getMinutes());
+    return '提词-' + t + '-' + stamp + '.mp4';
+  }
+
+  function startRecord() {
+    var text = $('inpText').value;
+    if (!text.trim()) {                                  // 空稿校验（双保险，按钮平时已禁用）
+      $('warnBar').hidden = false;
+      $('warnBar').textContent = '请先在左侧输入口播稿正文';
+      return;
+    }
+    if (!state.mime) return;
+    $('warnBar').hidden = true;
+
+    var W = state.W, H = state.H;
+    var layout = computeLayout(text, getFontSize(), W);
+    if (layout.totalScroll <= 0) { $('warnBar').hidden = false; $('warnBar').textContent = '口播稿为空，无法生成'; return; }
+    var v = getSpeed() * layout.scale;                   // 画布像素速度 = 基准速度 × 缩放
+    var total = calcDuration(layout, getSpeed());
+
+    /* 坑（沿用主应用 PiP 的教训）：同一 canvas 上旧 captureStream 的轨被 stop 后，
+       再取流可能拿到空流/死流。每次录制都新建画布，插进预览槽位替换静态预览，
+       录完移除——既保证流是新的，用户又能实时看到正在录的画面。 */
+    rec.canvas = document.createElement('canvas');
+    rec.canvas.width = W; rec.canvas.height = H;
+    rec.canvas.className = 'cv';
+    rec.ctx = rec.canvas.getContext('2d');
+    drawFrame(rec.ctx, W, H, layout, 0);                 // 先画好首帧再开机，避免开头透明帧
+    $('cv').hidden = true;
+    $('cvSlot').appendChild(rec.canvas);
+
+    var tracks = [];
+    var cs = rec.canvas.captureStream(30);               // 30fps 足够文字滚动平滑
+    tracks = cs.getVideoTracks();
+    if (!tracks.length) {
+      rec.canvas.remove(); rec.canvas = null; rec.ctx = null;
+      $('cv').hidden = false;
+      $('warnBar').hidden = false;
+      $('warnBar').textContent = '当前浏览器不支持画布录制，请用新版 Chrome 或 Edge 打开本页';
+      return;
+    }
+    try {
+      var at = ensureAudioTrack();                       // 静音音轨（iPhone PiP 必需）
+      if (at) tracks.push(at);
+    } catch (e) { /* 造不出音轨也继续，桌面 Chrome 录 MP4 一般不挑 */ }
+
+    rec.stream = new MediaStream(tracks);
+    rec.chunks = [];
+    try {
+      rec.recorder = new MediaRecorder(rec.stream, {
+        mimeType: state.mime,
+        videoBitsPerSecond: 4000000
+      });
+    } catch (e) {
+      cleanupStream();
+      $('warnBar').hidden = false;
+      $('warnBar').textContent = '启动录制失败：' + ((e && e.message) || '未知错误');
+      return;
+    }
+    rec.recorder.addEventListener('dataavailable', function (e) {
+      if (e.data && e.data.size) rec.chunks.push(e.data);
+    });
+    rec.recorder.addEventListener('error', function (e) {
+      rec.discarded = true;                              // 编码器出错，本次作废
+      stopRecorder();
+      $('warnBar').hidden = false;
+      $('warnBar').textContent = '录制出错，本次已作废，请重试：' + ((e && e.error && e.error.message) || '未知错误');
+    });
+    rec.recorder.addEventListener('stop', onRecStop);
+
+    rec.active = true; rec.discarded = false; rec.stopped = false;
+    rec.layout = layout; rec.v = v; rec.total = total; rec.t0 = 0;
+    $('formFields').disabled = true;                     // 录制中锁表单，参数不能再动
+    $('btnGen').disabled = true;
+    setState('recording');
+    rec.recorder.start(500);                             // 500ms 分片，长录更稳
+    rec.rafId = requestAnimationFrame(recFrame);
+  }
+
+  /* rAF 驱动（电脑前台环境 rAF 稳定）；用绝对时间算偏移，无累计漂移 */
+  function recFrame(ts) {
+    if (!rec.active) return;
+    if (!rec.t0) rec.t0 = ts;
+    var t = (ts - rec.t0) / 1000;
+    var off = offsetAt(t, rec.layout, rec.v);
+    drawFrame(rec.ctx, rec.canvas.width, rec.canvas.height, rec.layout, off);
+    var ratio = clamp(t / rec.total, 0, 1);
+    $('recBar').style.width = (ratio * 100).toFixed(2) + '%';
+    $('recTime').textContent = '已录 ' + t.toFixed(1) + ' 秒 / 约 ' + fmtDur(rec.total);
+    if (t < rec.total) {
+      rec.rafId = requestAnimationFrame(recFrame);
+    } else {
+      /* 让末帧有机会进编码器再收尾（250ms 足够 30fps 抓到最后一帧） */
+      setTimeout(function () { if (rec.active) stopRecorder(); }, 250);
+    }
+  }
+
+  function stopRecorder() {
+    if (rec.rafId) { cancelAnimationFrame(rec.rafId); rec.rafId = 0; }
+    rec.active = false;
+    try {
+      if (rec.recorder && rec.recorder.state !== 'inactive') rec.recorder.stop();
+      else onRecStop();                                  // 已经 inactive 时 stop 不会触发事件，手动收尾
+    } catch (e) { onRecStop(); }
+  }
+  function cleanupStream() {
+    /* 只停视频轨：音轨属于常驻 audioDest，留着给下一次录制复用 */
+    try {
+      if (rec.stream) {
+        var vt = rec.stream.getVideoTracks();
+        for (var i = 0; i < vt.length; i++) vt[i].stop();
+      }
+    } catch (e) { }
+    rec.stream = null;
+    if (rec.canvas) { rec.canvas.remove(); rec.canvas = null; rec.ctx = null; }
+    $('cv').hidden = false;
+  }
+
+  function onRecStop() {
+    if (rec.stopped) return;                             // 防重入：异常路径下手动静默
+    rec.stopped = true;                                  // 收尾与 stop 事件可能双触发，只结一次账
+    cleanupStream();
+    $('formFields').disabled = false;
+    $('btnGen').disabled = !state.mime || !$('inpText').value.trim();
+    if (rec.discarded) {
+      rec.chunks = [];
+      setState('idle');                                  // 警告条已由触发处显示
+      return;
+    }
+    var blob = new Blob(rec.chunks, { type: state.mime });
+    rec.chunks = [];
+    var name = buildFileName($('inpTitle').value);
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');                 // 自动触发下载
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);                        // Firefox 需要 a 在文档里再 click
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 15000);   // 下载器还需读一会儿
+    $('doneMeta').textContent = name + ' · 大小 ' + (blob.size / 1048576).toFixed(1) + ' MB · 时长 ' + fmtDur(rec.total);
+    setState('done');
+  }
+
+  /* 页面不在前台：rAF 停帧、录出来的视频会卡住——本次直接作废，提示重试 */
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState === 'hidden' && rec.active) {
+      rec.discarded = true;
+      $('warnBar').hidden = false;
+      $('warnBar').textContent = '页面不在前台，画面已暂停，请回来重录';
+      stopRecorder();
+    }
+  });
+
+  $('btnGen').addEventListener('click', startRecord);
+  $('btnAgain').addEventListener('click', startRecord);  // 再录一次：同参数直接重开
+
+  /* ==================== 启动 ==================== */
+  state.mime = pickMime();
+  if (!state.mime) {
+    $('unsupportedMsg').hidden = false;
+    $('btnGen').disabled = true;
+  }
+  var d0 = currentDims();
+  state.W = d0.W; state.H = d0.H;
+  refreshPreview();
+
+  /* 验收/自测钩子：仅 #test 时暴露内部纯函数，正常访问零影响 */
+  if (location.hash === '#test') {
+    window.__maker = {
+      computeLayout: computeLayout,
+      calcDuration: calcDuration,
+      offsetAt: offsetAt,
+      pickMime: pickMime,
+      LEAD: LEAD, TAIL: TAIL, READ_POS: READ_POS, BASE_W: BASE_W
+    };
+  }
+})();
+</script>
+</body>
+</html>
